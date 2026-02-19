@@ -1,15 +1,12 @@
-FROM golang:1.22
+FROM node:20
 
 WORKDIR /app
 
-COPY go.mod .
-COPY go.sum .
-RUN go mod download
+COPY package.json .
+RUN npm install
 
-COPY main.go .
-
-RUN go build -o server
+COPY server.js .
 
 EXPOSE 8080
 
-CMD ["./server"]
+CMD ["npm", "start"]
