@@ -4,16 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/t3rm1n4l/go-mega"
 )
 
 const maxSize int64 = 5 * 1024 * 1024 * 1024 // 5GB
@@ -29,71 +27,27 @@ type Response struct {
 }
 
 func initRedis() {
-	redisURL := os.Getenv("REDIS_URL")
-	if redisURL == "" {
-		log.Fatal("REDIS_URL not set")
-	}
-
-	opt, err := redis.ParseURL(redisURL)
+	opt, err := redis.ParseURL(os.Getenv("REDIS_URL"))
 	if err != nil {
-		log.Fatal("Invalid Redis URL:", err)
+		log.Fatal(err)
 	}
 
-	// 🔥 Force TLS for rediss://
 	opt.TLSConfig = &tls.Config{
 		MinVersion: tls.VersionTLS12,
 	}
 
 	rdb = redis.NewClient(opt)
 
-	// Test connection
 	_, err = rdb.Ping(ctx).Result()
 	if err != nil {
 		log.Fatal("Redis connection failed:", err)
 	}
 
-	fmt.Println("✅ Connected to Redis")
-}
-
-func getMegaInfo(url string) (string, int64, error) {
-
-	// 🔥 Check cache first
-	cache, err := rdb.Get(ctx, url).Result()
-	if err == nil {
-		parts := strings.Split(cache, "|")
-		size, _ := strconv.ParseInt(parts[1], 10, 64)
-		return parts[0], size, nil
-	}
-
-	cmd := exec.Command("mega-get", "--info", url)
-	out, err := cmd.Output()
-	if err != nil {
-		return "", 0, err
-	}
-
-	lines := strings.Split(string(out), "\n")
-	var name string
-	var size int64
-
-	for _, line := range lines {
-		if strings.Contains(line, "name:") {
-			name = strings.TrimSpace(strings.Split(line, ":")[1])
-		}
-		if strings.Contains(line, "size:") {
-			fields := strings.Fields(line)
-			size, _ = strconv.ParseInt(fields[1], 10, 64)
-		}
-	}
-
-	// 🔥 Cache for 1 hour
-	rdb.Set(ctx, url, fmt.Sprintf("%s|%d", name, size), time.Hour)
-
-	return name, size, nil
+	log.Println("✅ Redis connected")
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	url := r.URL.Query().Get("url")
-
 	if url == "" {
 		json.NewEncoder(w).Encode(Response{
 			Status: "error",
@@ -102,7 +56,20 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name, size, err := getMegaInfo(url)
+	// 🔥 Cache check
+	cache, err := rdb.Get(ctx, url).Result()
+	if err == nil {
+		size, _ := strconv.ParseInt(cache, 10, 64)
+		json.NewEncoder(w).Encode(Response{
+			Status: "success",
+			Size:   size,
+		})
+		return
+	}
+
+	m := mega.New()
+
+	node, err := m.NewFileFromURL(url)
 	if err != nil {
 		json.NewEncoder(w).Encode(Response{
 			Status: "error",
@@ -111,18 +78,21 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if size > maxSize {
+	if node.GetSize() > maxSize {
 		json.NewEncoder(w).Encode(Response{
 			Status: "error",
-			Error:  "File exceeds 5GB",
+			Error:  "File exceeds 5GB limit",
 		})
 		return
 	}
 
+	// Cache for 1 hour
+	rdb.Set(ctx, url, strconv.FormatInt(node.GetSize(), 10), time.Hour)
+
 	json.NewEncoder(w).Encode(Response{
 		Status: "success",
-		Name:   name,
-		Size:   size,
+		Name:   node.GetName(),
+		Size:   node.GetSize(),
 	})
 }
 
@@ -136,6 +106,6 @@ func main() {
 		port = "8080"
 	}
 
-	log.Println("🚀 Server running on port", port)
+	log.Println("🚀 Server running on", port)
 	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
