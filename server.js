@@ -1,10 +1,10 @@
 const http = require("http");
-const { File } = require("megajs");
+const { Storage } = require("megajs");
 const { createClient } = require("redis");
 
 const MAX_SIZE = 5 * 1024 * 1024 * 1024; // 5GB
 
-// Redis TLS (Upstash)
+// ===== REDIS TLS =====
 const redis = createClient({
   url: process.env.REDIS_URL,
   socket: {
@@ -13,36 +13,52 @@ const redis = createClient({
   }
 });
 
-redis.on("error", (err) => {
-  console.error("Redis error:", err);
-});
+redis.on("error", (err) => console.error("Redis error:", err));
 
 (async () => {
-  try {
-    await redis.connect();
-    console.log("✅ Redis connected");
-  } catch (err) {
-    console.error("Redis connection failed:", err);
-  }
+  await redis.connect();
+  console.log("✅ Redis connected");
 })();
 
+// ===== MEGA LOGIN =====
+const storage = new Storage({
+  email: process.env.MEGA_EMAIL,
+  password: process.env.MEGA_PASSWORD
+});
+
+storage.on("ready", () => {
+  console.log("✅ MEGA Logged In");
+});
+
+storage.on("error", err => {
+  console.error("Mega login error:", err);
+});
+
+// Wait until login ready
+async function ensureLogin() {
+  if (!storage.root) {
+    await new Promise(resolve => storage.once("ready", resolve));
+  }
+}
+
+// ===== SERVER =====
 const server = http.createServer(async (req, res) => {
+
   const urlObj = new URL(req.url, `http://${req.headers.host}`);
   const megaUrl = urlObj.searchParams.get("url");
 
   if (urlObj.pathname === "/") {
-    return res.end("🚀 Mega Download Proxy Running");
+    return res.end("🚀 Enterprise MEGA Proxy Running");
   }
 
   if (!megaUrl) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({
-      status: "error",
-      error: "Missing MEGA URL"
-    }));
+    res.writeHead(400);
+    return res.end("Missing MEGA URL");
   }
 
   try {
+    await ensureLogin();
+
     // ===== METADATA =====
     if (urlObj.pathname === "/api") {
 
@@ -55,12 +71,8 @@ const server = http.createServer(async (req, res) => {
         }));
       }
 
-      const file = File.fromURL(megaUrl);
+      const file = storage.fromURL(megaUrl);
       await file.loadAttributes();
-
-      if (!file.size) {
-        throw new Error("Could not fetch file size");
-      }
 
       if (file.size > MAX_SIZE) {
         return res.end(JSON.stringify({
@@ -79,15 +91,11 @@ const server = http.createServer(async (req, res) => {
       }));
     }
 
-    // ===== DOWNLOAD =====
+    // ===== DOWNLOAD PROXY =====
     if (urlObj.pathname === "/download") {
 
-      const file = File.fromURL(megaUrl);
+      const file = storage.fromURL(megaUrl);
       await file.loadAttributes();
-
-      if (!file.size) {
-        throw new Error("File size not found");
-      }
 
       if (file.size > MAX_SIZE) {
         res.writeHead(400);
@@ -97,8 +105,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, {
         "Content-Type": "application/octet-stream",
         "Content-Disposition": `attachment; filename="${file.name}"`,
-        "Content-Length": file.size,
-        "Accept-Ranges": "none"
+        "Content-Length": file.size
       });
 
       const stream = file.download();
@@ -109,7 +116,6 @@ const server = http.createServer(async (req, res) => {
       });
 
       stream.pipe(res);
-
       return;
     }
 
@@ -118,8 +124,7 @@ const server = http.createServer(async (req, res) => {
 
   } catch (err) {
     console.error("🔥 ERROR:", err.message);
-
-    res.writeHead(500, { "Content-Type": "application/json" });
+    res.writeHead(500);
     res.end(JSON.stringify({
       status: "error",
       error: err.message
