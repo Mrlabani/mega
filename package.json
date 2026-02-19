@@ -1,5 +1,5 @@
 {
-  "name": "mega-docker-api",
+  "name": "mega-enterprise-proxy",
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
