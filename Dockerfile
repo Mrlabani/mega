@@ -1,14 +1,20 @@
-FROM golang:1.22-alpine
+FROM golang:1.22
 
-RUN apk add --no-cache mega-cmd bash ca-certificates
+# Install dependencies
+RUN apt-get update && apt-get install -y \
+    mega-cmd \
+    ca-certificates \
+    bash \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 COPY go.mod .
 COPY go.sum .
+RUN go mod download
+
 COPY main.go .
 
-RUN go mod download
 RUN go build -o server
 
 EXPOSE 8080
