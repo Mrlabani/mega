@@ -13,9 +13,18 @@ const redis = createClient({
   }
 });
 
-redis.connect()
-  .then(() => console.log("✅ Redis connected"))
-  .catch(err => console.error("Redis error:", err));
+redis.on("error", (err) => {
+  console.error("Redis error:", err);
+});
+
+(async () => {
+  try {
+    await redis.connect();
+    console.log("✅ Redis connected");
+  } catch (err) {
+    console.error("Redis connection failed:", err);
+  }
+})();
 
 const server = http.createServer(async (req, res) => {
   const urlObj = new URL(req.url, `http://${req.headers.host}`);
@@ -26,13 +35,15 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (!megaUrl) {
-    res.writeHead(400);
-    return res.end("Missing MEGA URL");
+    res.writeHead(400, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({
+      status: "error",
+      error: "Missing MEGA URL"
+    }));
   }
 
   try {
-
-    // ===== METADATA API =====
+    // ===== METADATA =====
     if (urlObj.pathname === "/api") {
 
       const cached = await redis.get(megaUrl);
@@ -47,10 +58,14 @@ const server = http.createServer(async (req, res) => {
       const file = File.fromURL(megaUrl);
       await file.loadAttributes();
 
+      if (!file.size) {
+        throw new Error("Could not fetch file size");
+      }
+
       if (file.size > MAX_SIZE) {
         return res.end(JSON.stringify({
           status: "error",
-          error: "File exceeds 5GB"
+          error: "File exceeds 5GB limit"
         }));
       }
 
@@ -64,11 +79,15 @@ const server = http.createServer(async (req, res) => {
       }));
     }
 
-    // ===== DOWNLOAD PROXY =====
+    // ===== DOWNLOAD =====
     if (urlObj.pathname === "/download") {
 
       const file = File.fromURL(megaUrl);
       await file.loadAttributes();
+
+      if (!file.size) {
+        throw new Error("File size not found");
+      }
 
       if (file.size > MAX_SIZE) {
         res.writeHead(400);
@@ -78,15 +97,18 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, {
         "Content-Type": "application/octet-stream",
         "Content-Disposition": `attachment; filename="${file.name}"`,
-        "Content-Length": file.size
+        "Content-Length": file.size,
+        "Accept-Ranges": "none"
       });
 
       const stream = file.download();
-      stream.pipe(res);
 
-      stream.on("error", () => {
-        res.end();
+      stream.on("error", (err) => {
+        console.error("Stream error:", err);
+        res.destroy();
       });
+
+      stream.pipe(res);
 
       return;
     }
@@ -95,8 +117,13 @@ const server = http.createServer(async (req, res) => {
     res.end("Not Found");
 
   } catch (err) {
-    res.writeHead(500);
-    res.end("Error processing request");
+    console.error("🔥 ERROR:", err.message);
+
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({
+      status: "error",
+      error: err.message
+    }));
   }
 });
 
